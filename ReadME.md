@@ -73,4 +73,119 @@ When building a ticker dataset (`create_ticker_dataset_bis`), each window’s la
 
 and both images and `labels.csv` are written to disk under:
 
+dataset_bis/<TICKER>/
+images/ # 0.png, 1.png, ...
+labels/labels.csv
 
+
+See the dataset builder logic in `utils_datasets.py`. :contentReference[oaicite:12]{index=12}
+
+### 4) Train/val/test split
+`split_global_dataset(dataset_dir, ...)` loads all tickers’ labels, attaches file paths to each row, then uses stratified `train_test_split` twice to get train/val/test. :contentReference[oaicite:13]{index=13}
+
+### 5) TensorFlow input pipeline
+`dataframe_to_dataset_color(df, image_size=(114, 120))` creates a `tf.data.Dataset` that lazily:
+- reads PNGs from disk,
+- decodes RGB,
+- resizes,
+- scales to `[0, 1]`. :contentReference[oaicite:14]{index=14}
+
+---
+
+## Model architecture (CNN)
+
+The CNN defined in the training notebook is also reproduced in the thesis annex (“Model declaration”). It uses:
+
+- Input `(114, 120, 3)`
+- Conv blocks with BatchNorm and LeakyReLU in deeper layers
+- MaxPooling between blocks
+- GlobalAveragePooling2D
+- Dense(256) + Dropout(0.5)
+- Output: 2-way softmax
+
+and is trained with Adam (lr ≈ 5e-4) using a binary cross-entropy objective. :contentReference[oaicite:15]{index=15}
+
+The repo also includes Grad-CAM helpers (`make_gradcam_heatmap`, `superimpose_heatmap_on_image`, etc.) so you can visualize which candle regions drive the classification decision. :contentReference[oaicite:16]{index=16}
+
+---
+
+## Hedging / evaluation logic
+
+### Greeks + pricing proxy
+`utils_results.py` provides a Black–Scholes(-style) European call setup:
+
+- `black_scholes_call_price(...)`
+- `call_delta(...)`, `call_gamma(...)`, `call_vega(...)`
+- a realized volatility estimate from historical log returns (`get_realized_volatility`) :contentReference[oaicite:17]{index=17}
+
+The thesis frames these Greeks as a **proxy** (not live market-implied Greeks) and discusses the limitations explicitly. :contentReference[oaicite:18]{index=18}
+
+### Standard delta hedging ledger
+`get_hedgigng_dataframe(...)` (and the helper `normal_hedging(...)`) maintain a day-by-day ledger:
+- how many shares you need to hold (`notional * delta`)
+- how many you buy/sell to rebalance
+- average buy/sell prices
+- cumulative hedging “cost” tracked as net cash from trades
+
+This is used as the baseline “hedge once at the close” strategy. :contentReference[oaicite:19]{index=19}
+
+### Model-informed “two-step” hedging
+The strategy described in the thesis (Algorithm 1) is:
+
+- Each day, use the last 20 days’ image to predict whether a large intraday move is likely.
+- If yes (class 1), compute a **shadow delta**:
+  - conceptually: `Δ_shadow = Δ + Γ * (expected_move)`
+- Execute an early hedge at the **open** with `Δ_shadow` (so you buy more shares before the up-move).
+- At the **close**, rebalance again to the true delta.
+- If no (class 0), hedge only at the close. :contentReference[oaicite:20]{index=20}
+
+This is the “hedge timing” mechanism the repo is designed to illustrate. :contentReference[oaicite:21]{index=21}
+
+---
+
+## Quickstart (reproduce the notebooks)
+
+### 1) Install dependencies
+This project was developed in a Conda-like environment; `env.txt` is used as a package list. :contentReference[oaicite:22]{index=22}  
+Common approaches:
+- Create/activate a clean environment (conda or venv)
+- Install packages listed in `env.txt` (you may need to adapt it into a `requirements.txt` depending on your setup)
+
+### 2) Run notebooks in order
+Open Jupyter and run:
+
+1. `1-dataset_generations.ipynb`  
+   Generates the on-disk dataset folders (`dataset_bis/...`) from the chosen tickers.
+
+2. `2-basic_cnn.ipynb`  
+   Set `path_dataset = "<your dataset_bis path>"`, then train. Best weights are saved as `.keras`.
+
+3. `3-results.ipynb`  
+   Loads the trained model and evaluates the hedging experiment.
+
+---
+
+## Key knobs you can change
+
+- **Window length**: `n_days` / `window` (commonly 20)
+- **Threshold** for class 1: `tresh` (thesis uses ~0.007 = 0.7%) :contentReference[oaicite:23]{index=23}
+- **Image size**: the TF pipeline resizes to `(114, 120)` by default. :contentReference[oaicite:24]{index=24}
+- **Universe of tickers**: the dataset notebook uses a basket of liquid US industrial names (by design). :contentReference[oaicite:25]{index=25}
+- **Hedging period / notional**: set in `3-results.ipynb` (the thesis example highlights UPS over a stressed 2008–2009 window). :contentReference[oaicite:26]{index=26}
+
+---
+
+## Notes / caveats (important if you extend this)
+
+- Greeks are computed from a simplified proxy rather than live option chains; the thesis explicitly flags this as a limitation. :contentReference[oaicite:27]{index=27}
+- Execution assumptions for “open” trading are optimistic; realistic slippage and microstructure effects are not fully modeled. :contentReference[oaicite:28]{index=28}
+- The repo is notebook-first. If you want to productionize it, the clean next step is to refactor:
+  - a config file for paths/params,
+  - a CLI to run dataset build / training / evaluation,
+  - and deterministic experiment tracking.
+
+---
+
+## Reference
+
+For full methodological context, parameter choices, and the written motivation behind the image encoding + two-step hedging protocol, see the thesis PDF. :contentReference[oaicite:29]{index=29}
